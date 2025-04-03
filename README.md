@@ -1,0 +1,3 @@
+# nnunet
+Para entrenamiento 
+  
