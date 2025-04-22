@@ -123,7 +123,7 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
 
         # Usamos DiceMetric
         dice_metric = DiceMetric(include_background=False, reduction="mean", ignore_empty=True)
-        dice_metric(pred_tensor_oh, ref_tensor_oh)
+        dice_metric( mask_ref,  mask_pred)
         dice_val = dice_metric.aggregate().item()
 
         # También cálculo clásico como ya tenías (por si lo necesitas)
