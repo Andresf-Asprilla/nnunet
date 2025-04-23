@@ -3,7 +3,8 @@ import os
 from copy import deepcopy
 from multiprocessing import Pool
 from typing import Tuple, List, Union, Optional
-
+from monai.metrics import HausdorffDistanceMetric
+import torch
 import numpy as np
 from batchgenerators.utilities.file_and_folder_operations import subfiles, join, save_json, load_json, \
     isfile
@@ -86,15 +87,10 @@ def compute_tp_fp_fn_tn(mask_ref: np.ndarray, mask_pred: np.ndarray, ignore_mask
     return tp, fp, fn, tn
 
 
-import torch
-import numpy as np
-from monai.metrics import DiceMetric
-from monai.transforms import AsDiscrete
-
-def compute_metrics(reference_file: str, prediction_file: str, image_reader_writer,
-                    labels_or_regions,
+def compute_metrics(reference_file: str, prediction_file: str, image_reader_writer: BaseReaderWriter,
+                    labels_or_regions: Union[List[int], List[Union[int, Tuple[int, ...]]]],
                     ignore_label: int = None) -> dict:
-    # cargar imágenes
+    # load images
     seg_ref, seg_ref_dict = image_reader_writer.read_seg(reference_file)
     seg_pred, seg_pred_dict = image_reader_writer.read_seg(prediction_file)
 
@@ -104,47 +100,31 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
     results['reference_file'] = reference_file
     results['prediction_file'] = prediction_file
     results['metrics'] = {}
-
+    HD_metric = HausdorffDistanceMetric(include_background=False, reduction="mean")
     for r in labels_or_regions:
         results['metrics'][r] = {}
+        mask_ref = region_or_label_to_mask(seg_ref, r)
+        mask_pred = region_or_label_to_mask(seg_pred, r)
 
-        mask_ref = region_or_label_to_mask(seg_ref, r).astype(np.uint8)
-        mask_pred = region_or_label_to_mask(seg_pred, r).astype(np.uint8)
+        ref_tensor = torch.from_numpy(mask_ref).unsqueeze(0).unsqueeze(0).to(torch.bool)
+        pred_tensor = torch.from_numpy(mask_pred).unsqueeze(0).unsqueeze(0).to(torch.bool)
+        HD_score = HD_metric(pred_tensor, ref_tensor).item()
 
-        # Conversión a tensores (1 canal, 1 batch)
-        ref_tensor = torch.tensor(mask_ref[None, None, ...], dtype=torch.int64)
-        pred_tensor = torch.tensor(mask_pred[None, None, ...], dtype=torch.int64)
-
-        # Convertimos a one-hot con 2 clases: fondo y etiqueta actual
-        num_classes = 2
-        to_onehot = AsDiscrete(to_onehot=num_classes)
-        ref_tensor_oh = to_onehot(ref_tensor)
-        pred_tensor_oh = to_onehot(pred_tensor)
-
-        # Usamos DiceMetric
-        dice_metric = DiceMetric(include_background=False, reduction="mean", ignore_empty=True)
-        dice_metric( mask_ref,  mask_pred)
-        dice_val = dice_metric.aggregate().item()
-
-        # También cálculo clásico como ya tenías (por si lo necesitas)
+        # Almacenar los resultados en el diccionario de métricas
+        results['metrics'][r]['HausdorffDistance'] = HD_score
         tp, fp, fn, tn = compute_tp_fp_fn_tn(mask_ref, mask_pred, ignore_mask)
         if tp + fp + fn == 0:
-            classic_dice = np.nan
-            iou = np.nan
+            results['metrics'][r]['Dice'] = np.nan
+            results['metrics'][r]['IoU'] = np.nan
         else:
-            classic_dice = 2 * tp / (2 * tp + fp + fn)
-            iou = tp / (tp + fp + fn)
-
-        results['metrics'][r]['Dice'] = dice_val
-        results['metrics'][r]['Dice_classic'] = classic_dice
-        results['metrics'][r]['IoU'] = iou
+            results['metrics'][r]['Dice'] = 2 * tp / (2 * tp + fp + fn)
+            results['metrics'][r]['IoU'] = tp / (tp + fp + fn)
         results['metrics'][r]['FP'] = fp
         results['metrics'][r]['TP'] = tp
         results['metrics'][r]['FN'] = fn
         results['metrics'][r]['TN'] = tn
         results['metrics'][r]['n_pred'] = fp + tp
         results['metrics'][r]['n_ref'] = fn + tp
-
     return results
 
 
@@ -153,7 +133,7 @@ def compute_metrics_on_folder(folder_ref: str, folder_pred: str, output_file: st
                               file_ending: str,
                               regions_or_labels: Union[List[int], List[Union[int, Tuple[int, ...]]]],
                               ignore_label: int = None,
-                              num_processes: int = default_num_processes,
+                               num_processes: int = default_num_processes,
                               chill: bool = True) -> dict:
     """
     output_file must end with .json; can be None
@@ -208,6 +188,7 @@ def compute_metrics_on_folder2(folder_ref: str, folder_pred: str, dataset_json_f
                                output_file: str = None,
                                num_processes: int = default_num_processes,
                                chill: bool = False):
+
     dataset_json = load_json(dataset_json_file)
     # get file ending
     file_ending = dataset_json['file_ending']
