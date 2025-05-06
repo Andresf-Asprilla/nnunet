@@ -3,7 +3,7 @@ import os
 from copy import deepcopy
 from multiprocessing import Pool
 from typing import Tuple, List, Union, Optional
-from monai.metrics import HausdorffDistanceMetric
+from monai.metrics import DiceMetric,HausdorffDistanceMetric
 import torch
 import numpy as np
 from batchgenerators.utilities.file_and_folder_operations import subfiles, join, save_json, load_json, \
@@ -74,6 +74,10 @@ def region_or_label_to_mask(segmentation: np.ndarray, region_or_label: Union[int
             mask[segmentation == r] = True
     return mask
 
+def to_monai_tensor(np_array):
+    tensor = torch.from_numpy(np_array.astype(np.uint8)).to(torch.float32)
+    tensor = tensor.unsqueeze(0)
+    return tensor
 
 def compute_tp_fp_fn_tn(mask_ref: np.ndarray, mask_pred: np.ndarray, ignore_mask: np.ndarray = None):
     if ignore_mask is None:
@@ -100,18 +104,24 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
     results['reference_file'] = reference_file
     results['prediction_file'] = prediction_file
     results['metrics'] = {}
-    HD_metric = HausdorffDistanceMetric(include_background=False, reduction="mean")
+    hd_metric =  HausdorffDistanceMetric(include_background=False, percentile=95.0, reduction="mean")
+    dice_metric = DiceMetric(include_background=False, reduction="mean")
     for r in labels_or_regions:
         results['metrics'][r] = {}
         mask_ref = region_or_label_to_mask(seg_ref, r)
         mask_pred = region_or_label_to_mask(seg_pred, r)
+        dice_metric = DiceMetric(include_background=False, reduction="mean")
 
-        ref_tensor = torch.from_numpy(mask_ref).unsqueeze(0).unsqueeze(0).to(torch.bool)
-        pred_tensor = torch.from_numpy(mask_pred).unsqueeze(0).unsqueeze(0).to(torch.bool)
-        HD_score = HD_metric(pred_tensor, ref_tensor).item()
+        ref_tensor = to_monai_tensor(mask_ref)
+        pred_tensor = to_monai_tensor(mask_pred)
+        dice_monai = dice_metric(pred_tensor, ref_tensor).item()
+        if mask_ref.sum() > 0 and mask_pred.sum() > 0:
+            hd_score = hd_metric(pred_tensor, ref_tensor).item()
+        else:
+            hd_score = np.nan
 
         # Almacenar los resultados en el diccionario de métricas
-        results['metrics'][r]['HausdorffDistance'] = HD_score
+        
         tp, fp, fn, tn = compute_tp_fp_fn_tn(mask_ref, mask_pred, ignore_mask)
         if tp + fp + fn == 0:
             results['metrics'][r]['Dice'] = np.nan
@@ -119,6 +129,8 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
         else:
             results['metrics'][r]['Dice'] = 2 * tp / (2 * tp + fp + fn)
             results['metrics'][r]['IoU'] = tp / (tp + fp + fn)
+        results['metrics'][r]['Dice Monai'] = dice_monai
+        results['metrics'][r]['HausdorffDistance'] = hd_score
         results['metrics'][r]['FP'] = fp
         results['metrics'][r]['TP'] = tp
         results['metrics'][r]['FN'] = fn
